@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>اتاق گفتگو (بلادرنگ و همزمان)</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  body { 
+    font-family: Tahoma, sans-serif; 
+    background: #0f172a; 
+    color: #fff; 
+    margin: 0; 
+    height: 100vh; 
+    display: flex; 
+    flex-direction: column; 
+    align-items: center; 
+    justify-content: center; 
+    overflow: hidden;
+  }
+  
+  #start-screen {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background: #0f172a; z-index: 100;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  #start-btn {
+    padding: 20px 40px; font-size: 24px; font-weight: bold;
+    background: linear-gradient(45deg, #3b82f6, #8b5cf6);
+    color: white; border: none; border-radius: 50px; cursor: pointer;
+    box-shadow: 0 10px 20px rgba(59, 130, 246, 0.3);
+    transition: transform 0.2s;
+  }
+  #start-btn:hover { transform: scale(1.05); }
+
+  #main-screen { display: none; flex-direction: column; align-items: center; }
+  
+  #status {
+    margin-bottom: 40px;
+    font-size: 18px;
+    color: #94a3b8;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: #ef4444; transition: 0.3s;}
+  .dot.connected { background: #10b981; box-shadow: 0 0 10px #10b981; }
+
+  #mic-btn {
+    width: 120px; height: 120px; border-radius: 50%;
+    border: none; cursor: pointer;
+    background: #1e293b; color: #fff;
+    font-size: 50px; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+    transition: all 0.3s ease;
+    position: relative;
+    user-select: none;
+  }
+  
+  #mic-btn.active {
+    background: #ef4444;
+    box-shadow: 0 0 30px rgba(239, 68, 68, 0.6);
+    animation: pulse 1.5s infinite;
+  }
+  
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+    70% { box-shadow: 0 0 0 20px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+  }
+
+  #mic-text { margin-top: 20px; font-size: 16px; color: #cbd5e1; }
+
+  #log {
+    position: absolute; bottom: 10px; left: 10px; right: 10px;
+    height: 60px; overflow-y: auto; font-size: 11px; color: #64748b;
+    background: rgba(0,0,0,0.3); padding: 10px; border-radius: 8px;
+    direction: ltr; text-align: left;
+  }
+</style>
+</head>
+<body>
+
+<div id="start-screen">
+  <h1 style="margin-bottom: 10px;">🎙️ اتاق گفتگو</h1>
+  <p style="color: #94a3b8; margin-bottom: 30px;">برای ورود و شنیدن صدا، کلیک کنید</p>
+  <button id="start-btn">ورود به اتاق</button>
+</div>
+
+<div id="main-screen">
+  <div id="status">
+    <div class="dot" id="conn-dot"></div>
+    <span id="status-text">در حال اتصال به سرور...</span>
+  </div>
+
+  <button id="mic-btn">
+    <svg width="50" height="50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path>
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+      <line x1="12" y1="19" x2="12" y2="22"></line>
+    </svg>
+  </button>
+  <div id="mic-text">برای صحبت کلیک کنید</div>
+</div>
+
+<div id="log"></div>
+
+<script>
+// ==== تنظیمات ====
+const MQTT_URL = "wss://broker.emqx.io:8084/mqtt"; 
+const TOPIC = "live-audio/room-persian-superfast-987"; 
+const SAMPLE_RATE = 8000; // کیفیت تلفنی (حجم فوق‌العاده کم)
+const BUFFER_SIZE = 1024; // ۱۲۸ میلی‌ثانیه
+
+// ==== وضعیت ====
+let client = null;
+let micStream = null;
+let isRecording = false;
+let clientId = "user_" + Math.random().toString(16).substr(2, 6) + Date.now();
+let audioCtx = null;
+
+// برای ارسال
+let micSource = null;
+let micProcessor = null;
+
+// برای دریافت (پخش همزمان)
+const activeSources = new Set();
+let nextPlayTime = 0;
+
+const startScreen = document.getElementById("start-screen");
+const mainScreen = document.getElementById("main-screen");
+const startBtn = document.getElementById("start-btn");
+const micBtn = document.getElementById("mic-btn");
+const micText = document.getElementById("mic-text");
+const statusText = document.getElementById("status-text");
+const connDot = document.getElementById("conn-dot");
+const logEl = document.getElementById("log");
+
+function log(msg) {
+  logEl.innerHTML += `[${new Date().toLocaleTimeString()}] ${msg}<br>`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ==== 1. شروع کار ====
+startBtn.addEventListener("click", async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = "در حال اتصال...";
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ 
+      audio: { 
+        echoCancellation: true, 
+        noiseSuppression: true, 
+        autoGainControl: true,
+        channelCount: 1 
+      } 
+    });
+    
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ 
+      sampleRate: SAMPLE_RATE,
+      latencyHint: 'interactive' 
+    });
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    startScreen.style.display = "none";
+    mainScreen.style.display = "flex";
+    
+    connectMQTT();
+
+  } catch (err) {
+    alert("برای استفاده از اتاق، باید به میکروفون دسترسی بدهید.");
+    startBtn.disabled = false;
+    startBtn.textContent = "ورود به اتاق";
+    log("Mic Error: " + err.message);
+  }
+});
+
+// ==== 2. اتصال به MQTT ====
+function connectMQTT() {
+  client = mqtt.connect(MQTT_URL, {
+    clientId: clientId,
+    clean: true,
+    keepalive: 60,
+    reconnectPeriod: 2000,
+  });
+
+  client.on("connect", () => {
+    connDot.classList.add("connected");
+    statusText.textContent = "متصل شد (آماده شنیدن)";
+    log("Connected to MQTT");
+    client.subscribe(TOPIC, { qos: 0 });
+    
+    // همگام‌سازی زمان پخش با سرور
+    nextPlayTime = audioCtx.currentTime;
+  });
+
+  client.on("reconnect", () => {
+    connDot.classList.remove("connected");
+    statusText.textContent = "در حال اتصال مجدد...";
+  });
+
+  client.on("error", (e) => log("MQTT Error: " + e.message));
+
+  // دریافت صدا و پخش فوری (بدون صف)
+  client.on("message", (topic, payload) => {
+    if (topic !== TOPIC || !audioCtx) return;
+    
+    try {
+      // تبدیل داده خام Uint8 به Int16
+      const uint8Array = new Uint8Array(payload);
+      const int16Data = new Int16Array(uint8Array.buffer);
+      
+      // تبدیل به Float32 برای پخش
+      const float32Data = new Float32Array(int16Data.length);
+      for (let i = 0; i < int16Data.length; i++) {
+        float32Data[i] = int16Data[i] / 32768.0;
+      }
+
+      // ساخت بافر صوتی
+      const audioBuffer = audioCtx.createBuffer(1, float32Data.length, SAMPLE_RATE);
+      audioBuffer.copyToChannel(float32Data, 0);
+
+      // پخش فوری (بدون معطلی)
+      const source = audioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioCtx.destination);
+      
+      // زمان‌بندی پخش برای پیوستگی کامل
+      const now = audioCtx.currentTime;
+      if (nextPlayTime < now) nextPlayTime = now;
+      
+      source.start(nextPlayTime);
+      nextPlayTime += audioBuffer.duration;
+      
+      // مدیریت منابع برای جلوگیری از نشت حافظه
+      activeSources.add(source);
+      source.onended = () => {
+        activeSources.delete(source);
+      };
+      
+    } catch (e) {
+      // نادیده گرفتن خطاهای تکی (مثلاً اگر داده‌ای خراب باشد)
+    }
+  });
+}
+
+// ==== 3. ضبط و ارسال صدا ====
+function startRecording() {
+  if (!micStream || !audioCtx) return;
+  
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+
+  micSource = audioCtx.createMediaStreamSource(micStream);
+  micProcessor = audioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
+  
+  micProcessor.onaudioprocess = (e) => {
+    if (!isRecording) return;
+    
+    const inputData = e.inputBuffer.getChannelData(0);
+    const int16Data = new Int16Array(inputData.length);
+    
+    for (let i = 0; i < inputData.length; i++) {
+      let s = Math.max(-1, Math.min(1, inputData[i]));
+      int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+
+    if (client && client.connected) {
+      client.publish(TOPIC, new Uint8Array(int16Data.buffer), { qos: 0 });
+    }
+  };
+
+  micSource.connect(micProcessor);
+  micProcessor.connect(audioCtx.destination);
+}
+
+function stopRecording() {
+  if (micSource) micSource.disconnect();
+  if (micProcessor) micProcessor.disconnect();
+}
+
+// ==== رویداد دکمه میکروفون ====
+micBtn.addEventListener("click", () => {
+  if (!isRecording) {
+    startRecording();
+    isRecording = true;
+    micBtn.classList.add("active");
+    micText.textContent = "در حال صحبت... (برای قطع کلیک کنید)";
+  } else {
+    stopRecording();
+    isRecording = false;
+    micBtn.classList.remove("active");
+    micText.textContent = "برای صحبت کلیک کنید";
+  }
+});
+
+// آزادسازی منابع
+window.addEventListener("beforeunload", () => {
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  if (client) client.end();
+  activeSources.forEach(s => { try { s.stop(); } catch(e){} });
+  activeSources.clear();
+});
+</script>
+</body>
+</html>
