@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>اتاق گفتگو (بلادرنگ و همزمان)</title>
+<title>اتاق گفتگو (رفع باگ صدای خودی)</title>
 <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <style>
   body { 
@@ -108,9 +108,9 @@
 <script>
 // ==== تنظیمات ====
 const MQTT_URL = "wss://broker.emqx.io:8084/mqtt"; 
-const TOPIC = "live-audio/room-persian-superfast-987"; 
-const SAMPLE_RATE = 8000; // کیفیت تلفنی (حجم فوق‌العاده کم)
-const BUFFER_SIZE = 1024; // ۱۲۸ میلی‌ثانیه
+const TOPIC = "live-audio/room-persian-final-987"; 
+const SAMPLE_RATE = 8000; 
+const BUFFER_SIZE = 1024; 
 
 // ==== وضعیت ====
 let client = null;
@@ -123,9 +123,8 @@ let audioCtx = null;
 let micSource = null;
 let micProcessor = null;
 
-// برای دریافت (پخش همزمان)
-const activeSources = new Set();
-let nextPlayTime = 0;
+// برای دریافت (زمان‌بندی مستقل برای هر کاربر برای جلوگیری از تداخل)
+const playTimes = new Map(); // ذخیره زمان پخش آخرین تکه برای هر فرستنده
 
 const startScreen = document.getElementById("start-screen");
 const mainScreen = document.getElementById("main-screen");
@@ -187,11 +186,8 @@ function connectMQTT() {
   client.on("connect", () => {
     connDot.classList.add("connected");
     statusText.textContent = "متصل شد (آماده شنیدن)";
-    log("Connected to MQTT");
+    log("Connected to MQTT. My ID: " + clientId);
     client.subscribe(TOPIC, { qos: 0 });
-    
-    // همگام‌سازی زمان پخش با سرور
-    nextPlayTime = audioCtx.currentTime;
   });
 
   client.on("reconnect", () => {
@@ -201,16 +197,25 @@ function connectMQTT() {
 
   client.on("error", (e) => log("MQTT Error: " + e.message));
 
-  // دریافت صدا و پخش فوری (بدون صف)
+  // دریافت صدا
   client.on("message", (topic, payload) => {
     if (topic !== TOPIC || !audioCtx) return;
     
     try {
-      // تبدیل داده خام Uint8 به Int16
-      const uint8Array = new Uint8Array(payload);
+      // ⚠️ اصلاح باگ اصلی: بررسی اینکه آیا پیام از خودمان است یا خیر
+      // داده‌ها با یک شناسه فرستنده شروع می‌شوند (طول ثابت)
+      const decoder = new TextDecoder();
+      const senderLength = 40; // طول ثابت شناسه کاربر
+      const sender = decoder.decode(payload.slice(0, senderLength));
+      
+      // اگر پیام از خودمان بود، نادیده بگیر
+      if (sender === clientId) return;
+
+      // دریافت داده صوتی (بعد از شناسه)
+      const audioBytes = payload.slice(senderLength);
+      const uint8Array = new Uint8Array(audioBytes);
       const int16Data = new Int16Array(uint8Array.buffer);
       
-      // تبدیل به Float32 برای پخش
       const float32Data = new Float32Array(int16Data.length);
       for (let i = 0; i < int16Data.length; i++) {
         float32Data[i] = int16Data[i] / 32768.0;
@@ -220,26 +225,32 @@ function connectMQTT() {
       const audioBuffer = audioCtx.createBuffer(1, float32Data.length, SAMPLE_RATE);
       audioBuffer.copyToChannel(float32Data, 0);
 
-      // پخش فوری (بدون معطلی)
+      // پخش فوری
       const source = audioCtx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(audioCtx.destination);
       
-      // زمان‌بندی پخش برای پیوستگی کامل
+      // مدیریت زمان پخش برای هر فرستنده به صورت مجزا
       const now = audioCtx.currentTime;
-      if (nextPlayTime < now) nextPlayTime = now;
+      let senderNextTime = playTimes.get(sender) || now;
       
-      source.start(nextPlayTime);
-      nextPlayTime += audioBuffer.duration;
+      if (senderNextTime < now) {
+        senderNextTime = now; // اگر عقب افتاد، از الان شروع کن
+      }
       
-      // مدیریت منابع برای جلوگیری از نشت حافظه
-      activeSources.add(source);
+      source.start(senderNextTime);
+      playTimes.set(sender, senderNextTime + audioBuffer.duration);
+
+      // پاکسازی حافظه
       source.onended = () => {
-        activeSources.delete(source);
+        // اگر تایم‌لاین فرستنده خیلی قدیمی شده، پاکش کن
+        if (playTimes.get(sender) < audioCtx.currentTime - 2) {
+          playTimes.delete(sender);
+        }
       };
       
     } catch (e) {
-      // نادیده گرفتن خطاهای تکی (مثلاً اگر داده‌ای خراب باشد)
+      // نادیده گرفتن خطاهای تکی
     }
   });
 }
@@ -265,7 +276,15 @@ function startRecording() {
     }
 
     if (client && client.connected) {
-      client.publish(TOPIC, new Uint8Array(int16Data.buffer), { qos: 0 });
+      // ⚠️ اصلاح باگ: شناسه فرستنده را با یک طول ثابت به ابتدای پیام اضافه می‌کنیم
+      const senderBytes = new TextEncoder().encode(clientId.padEnd(40, ' '));
+      const audioBytes = new Uint8Array(int16Data.buffer);
+      
+      const combined = new Uint8Array(senderBytes.length + audioBytes.length);
+      combined.set(senderBytes, 0);
+      combined.set(audioBytes, senderBytes.length);
+      
+      client.publish(TOPIC, combined, { qos: 0 });
     }
   };
 
@@ -297,8 +316,6 @@ micBtn.addEventListener("click", () => {
 window.addEventListener("beforeunload", () => {
   if (micStream) micStream.getTracks().forEach(t => t.stop());
   if (client) client.end();
-  activeSources.forEach(s => { try { s.stop(); } catch(e){} });
-  activeSources.clear();
 });
 </script>
 </body>
