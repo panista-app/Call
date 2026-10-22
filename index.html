@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>صدای زنده با MQTT</title>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  body { font-family: sans-serif; background:#111; color:#eee; padding:20px; }
+  button { padding:10px 20px; margin:5px; font-size:16px; cursor:pointer; }
+  button:disabled { opacity:0.4; cursor:not-allowed; }
+  #status { margin-top:10px; color:#0f0; }
+  #log { margin-top:20px; font-size:12px; color:#888; max-height:200px; overflow:auto; }
+  .box { background:#222; padding:15px; border-radius:8px; margin-bottom:15px; }
+</style>
+</head>
+<body>
+
+<h2>🎙️ صدای زنده با MQTT</h2>
+
+<div class="box">
+  <p id="permMsg">برای شروع، ابتدا دسترسی به میکروفون را تأیید کنید.</p>
+  <button id="permBtn">🎤 اجازه دسترسی به میکروفون</button>
+</div>
+
+<div class="box">
+  <button id="startBtn" disabled>▶️ شروع صحبت</button>
+  <button id="stopBtn" disabled>⏹️ قطع صحبت</button>
+  <div id="status">وضعیت: در انتظار اجازه میکروفون...</div>
+</div>
+
+<div id="log"></div>
+
+<script>
+// ==== تنظیمات ====
+const MQTT_URL = "wss://broker.emqx.io:8084/mqtt"; // بروکر عمومی - برای تست
+const TOPIC = "live-audio/room1";                   // تاپیک صدا
+const CHUNK_MS = 250;                                // طول هر تکه صدا (میلی‌ثانیه)
+
+// ==== وضعیت ====
+let client = null;
+let mediaRecorder = null;
+let micStream = null;         // استریم میکروفون که بعد از اجازه نگه می‌داریم
+let micGranted = false;       // آیا اجازه میکروفون داده شده؟
+let isSpeaking = false;
+let audioQueue = [];
+let isPlaying = false;
+let audioCtx = null;
+
+const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+const permMsg = document.getElementById("permMsg");
+const permBtn = document.getElementById("permBtn");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+
+function log(msg) {
+  logEl.innerHTML += msg + "<br>";
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ==== مرحله ۱: گرفتن اجازه میکروفون ====
+async function requestMicPermission() {
+  permBtn.disabled = true;
+  permMsg.textContent = "در حال درخواست اجازه از مرورگر...";
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 24000,
+        echoCancellation: true,
+        noiseSuppression: true,
+      }
+    });
+    micGranted = true;
+    permMsg.textContent = "✅ دسترسی به میکروفون تأیید شد.";
+    permBtn.style.display = "none";
+    log("اجازه میکروفون گرفته شد.");
+    startBtn.disabled = false;
+
+    // حالا که اجازه داریم، اتصال MQTT رو شروع کن
+    connectMQTT();
+  } catch (e) {
+    permMsg.textContent = "❌ دسترسی رد شد یا خطا: " + e.message;
+    permBtn.disabled = false;
+    log("خطا در گرفتن میکروفون: " + e.message);
+    alert("برای استفاده از این صفحه، باید به میکروفون اجازه دسترسی بدید.");
+  }
+}
+
+// ==== مرحله ۲: اتصال به MQTT ====
+function connectMQTT() {
+  const clientId = "voice_" + Math.random().toString(16).substr(2, 8);
+
+  client = mqtt.connect(MQTT_URL, {
+    clientId,
+    clean: true,
+    connectTimeout: 5000,
+    reconnectPeriod: 2000,
+  });
+
+  client.on("connect", () => {
+    statusEl.textContent = "وضعیت: متصل به MQTT ✅ (ساکت)";
+    log("متصل شد. Client ID: " + clientId);
+    client.subscribe(TOPIC, { qos: 0 }, (err) => {
+      if (err) log("خطا در subscribe: " + err);
+      else log("Subscribed به: " + TOPIC);
+    });
+  });
+
+  client.on("reconnect", () => statusEl.textContent = "وضعیت: در حال اتصال مجدد...");
+  client.on("error", (e) => log("خطای MQTT: " + e.message));
+
+  client.on("message", (topic, payload) => {
+    if (topic !== TOPIC) return;
+    try {
+      const obj = JSON.parse(payload.toString());
+      if (obj.senderId === client.options.clientId) return;
+      if (obj.type === "audio" && obj.data) {
+        audioQueue.push(obj.data);
+        if (!isPlaying) playQueue();
+      }
+    } catch (e) {
+      // پیام غیر JSON رو نادیده بگیر
+    }
+  });
+}
+
+// ==== مرحله ۳: شروع صحبت ====
+function startSpeaking() {
+  if (!micGranted || !micStream) {
+    alert("ابتدا اجازه میکروفون را تأیید کنید.");
+    return;
+  }
+  if (isSpeaking || !client || !client.connected) return;
+
+  // انتخاب کدک با حجم کم
+  let mimeType = "";
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/ogg;codecs=opus",
+    "audio/webm",
+  ];
+  for (const c of candidates) {
+    if (MediaRecorder.isTypeSupported(c)) { mimeType = c; break; }
+  }
+
+  const options = mimeType
+    ? { mimeType, audioBitsPerSecond: 24000 }
+    : { audioBitsPerSecond: 24000 };
+
+  try {
+    mediaRecorder = new MediaRecorder(micStream, options);
+  } catch (e) {
+    log("خطا در ساخت MediaRecorder: " + e.message);
+    return;
+  }
+
+  mediaRecorder.ondataavailable = async (event) => {
+    if (event.data.size === 0) return;
+    const buf = await event.data.arrayBuffer();
+    const base64 = arrayBufferToBase64(buf);
+
+    const msg = JSON.stringify({
+      type: "audio",
+      senderId: client.options.clientId,
+      data: base64,
+      mime: mediaRecorder.mimeType,
+    });
+
+    client.publish(TOPIC, msg, { qos: 0 });
+  };
+
+  mediaRecorder.start(CHUNK_MS);
+  isSpeaking = true;
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  statusEl.textContent = "وضعیت: در حال صحبت 🎤";
+  log("ضبط شروع شد - MIME: " + mediaRecorder.mimeType);
+}
+
+function stopSpeaking() {
+  if (!isSpeaking) return;
+
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+  }
+  isSpeaking = false;
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  statusEl.textContent = "وضعیت: متصل (ساکت) 🔇";
+  log("ضبط متوقف شد.");
+  // توجه: micStream رو نگه می‌داریم تا بشه دوباره ضبط کرد
+}
+
+// ==== پخش تکه‌های صوتی دریافتی ====
+async function playQueue() {
+  isPlaying = true;
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  while (audioQueue.length > 0) {
+    const b64 = audioQueue.shift();
+    try {
+      const arr = base64ToArrayBuffer(b64);
+      const audioBuffer = await audioCtx.decodeAudioData(arr.slice(0));
+      const src = audioCtx.createBufferSource();
+      src.buffer = audioBuffer;
+      src.connect(audioCtx.destination);
+      src.start();
+      await new Promise(res => setTimeout(res, audioBuffer.duration * 1000));
+    } catch (e) {
+      log("خطا در پخش یک تکه: " + e.message);
+    }
+  }
+
+  isPlaying = false;
+}
+
+// ==== ابزار تبدیل ====
+function arrayBufferToBase64(buffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// ==== رویدادها ====
+permBtn.addEventListener("click", requestMicPermission);
+startBtn.addEventListener("click", startSpeaking);
+stopBtn.addEventListener("click", stopSpeaking);
+
+window.addEventListener("beforeunload", () => {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  if (client) client.end();
+});
+</script>
+</body>
+</html>
