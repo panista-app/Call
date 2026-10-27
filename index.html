@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>گفتگوی صوتی گروهی (mqtt.giot.ir)</title>
+    <title>گفتگوی صوتی گروهی</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -17,45 +17,80 @@
             justify-content: center;
             user-select: none;
         }
+
         #status-bar {
-            position: fixed; top: 16px; right: 16px;
-            display: flex; align-items: center; gap: 8px;
-            font-size: 13px; color: #aaa;
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: #aaa;
             background: rgba(255,255,255,0.05);
-            padding: 6px 12px; border-radius: 20px;
+            padding: 6px 12px;
+            border-radius: 20px;
         }
         .dot {
-            width: 8px; height: 8px; border-radius: 50%;
-            background: #555; transition: background 0.3s;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #555;
+            transition: background 0.3s;
         }
         .dot.online { background: #4caf50; }
-        .dot.error { background: #f44336; }
+
         #mic-btn {
-            width: 140px; height: 140px; border-radius: 50%;
-            border: none; cursor: pointer; font-size: 48px;
-            display: flex; align-items: center; justify-content: center;
-            transition: all 0.2s; background: #2a2a2a; color: #888;
-            box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); outline: none;
+            width: 140px;
+            height: 140px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            font-size: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            background: #2a2a2a;
+            color: #888;
+            box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+            outline: none;
         }
         #mic-btn:hover { background: #333; }
         #mic-btn.active {
-            background: #1b5e20; color: #fff;
+            background: #1b5e20;
+            color: #fff;
             box-shadow: 0 0 0 16px rgba(76, 175, 80, 0.15);
         }
+        #mic-btn.active:hover { background: #2e7d32; }
         #mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
         #label {
-            margin-top: 24px; font-size: 15px; color: #777;
-            text-align: center; line-height: 1.8;
+            margin-top: 24px;
+            font-size: 15px;
+            color: #777;
+            text-align: center;
+            line-height: 1.8;
         }
-        #peers-count { margin-top: 8px; font-size: 13px; color: #555; }
+
+        #peers-count {
+            margin-top: 8px;
+            font-size: 13px;
+            color: #555;
+        }
     </style>
 </head>
 <body>
+
     <div id="status-bar">
         <span class="dot" id="mqtt-dot"></span>
-        <span id="mqtt-label">در حال اتصال به mqtt.giot.ir...</span>
+        <span id="mqtt-label">در حال اتصال...</span>
     </div>
-    <button id="mic-btn" disabled>🎤</button>
+
+    <button id="mic-btn" disabled aria-label="روشن/خاموش کردن میکروفون">
+        🎤
+    </button>
+
     <div id="label">
         برای صحبت، دکمه میکروفون را بزنید
         <div id="peers-count">در حال جستجوی اتاق...</div>
@@ -64,112 +99,111 @@
     <script type="module">
         import { joinRoom } from 'https://esm.run/trystero/mqtt';
 
-        const micBtn     = document.getElementById('mic-btn');
-        const mqttDot    = document.getElementById('mqtt-dot');
-        const mqttLabel  = document.getElementById('mqtt-label');
-        const peersCount = document.getElementById('peers-count');
+        const micBtn      = document.getElementById('mic-btn');
+        const mqttDot     = document.getElementById('mqtt-dot');
+        const mqttLabel   = document.getElementById('mqtt-label');
+        const peersCount  = document.getElementById('peers-count');
 
+        // ─── تنظیمات اتاق عمومی ───
+        // همه کسانی که این فایل را باز کنند، به این اتاق وصل می‌شوند.
+        // می‌توانید appId و roomId را ثابت نگه دارید تا یک اتاق دائمی داشته باشید.
         const APP_ID  = 'my-public-voice-chat-v1';
         const ROOM_ID = 'public-room-main';
 
-        // ─── تنظیمات بروکر اختصاصی ───
-        // نام کاربری و رمز عبور mqtt.giot.ir در URL تعبیه شده‌اند.
-        // چند آدرس محتمل WebSocket را امتحان می‌کنیم (پورت ۸۰۸۳ برای ws و ۸۰۸۴ برای wss رایج است).
-        // اگر هیچ‌کدام کار نکرد، Trystero به بروکرهای پیش‌فرض خود برمی‌گردد.
-        const GIOT_RELAY_URLS = [
-            'wss://giot:giot@mqtt.giot.ir:8084/mqtt',  // TLS WebSocket (محتمل‌ترین)
-            'ws://giot:giot@mqtt.giot.ir:8083/mqtt',   // WebSocket بدون TLS (فقط برای تست)
-            'wss://giot:giot@mqtt.giot.ir/mqtt'        // بدون پورت (اگر روی ۴۴۳ باشد)
-        ];
-
+        // ─── تنظیمات صدا (حجم بسیار کم، کیفیت گفتاری) ───
         const AUDIO_CONSTRAINTS = {
             audio: {
-                channelCount: 1,
-                sampleRate: 16000,
+                channelCount: 1,              // مونو
+                sampleRate: 16000,            // ۱۶ کیلوهرتز (برای گفتار کافی است)
                 echoCancellation: true,
                 noiseSuppression: true,
                 autoGainControl: true
             }
         };
-        const MAX_AUDIO_BITRATE = 24000;
+        const MAX_AUDIO_BITRATE = 24000;      // 24 kbps برای Opus
 
         let room = null;
         let selfStream = null;
         let isMicOn = false;
-        const peerAudios = {};
+        const peerAudios = {};                // peerId -> HTMLAudioElement
 
+        // ─── ابزارهای رابط کاربری ───
         function setMicUI(on) {
             micBtn.classList.toggle('active', on);
             micBtn.textContent = on ? '🔴' : '🎤';
             micBtn.setAttribute('aria-pressed', on);
         }
 
-        function setMqttStatus(state) { // 'online', 'error', 'connecting'
-            mqttDot.className = 'dot' + (state === 'online' ? ' online' : state === 'error' ? ' error' : '');
-            mqttLabel.textContent = state === 'online'
-                ? 'متصل به mqtt.giot.ir'
-                : state === 'error'
-                    ? 'اتصال به mqtt.giot.ir برقرار نشد'
-                    : 'در حال اتصال به mqtt.giot.ir...';
+        function setMqttStatus(online) {
+            mqttDot.classList.toggle('online', online);
+            mqttLabel.textContent = online ? 'متصل به اتاق' : 'در حال اتصال...';
         }
 
         function updatePeersCount() {
             if (!room) return;
-            const n = Object.keys(room.getPeers()).length;
+            const peers = room.getPeers();
+            const n = Object.keys(peers).length;
             peersCount.textContent = n === 0
-                ? 'هنوز کسی در اتاق نیست'
+                ? 'هنوز کسی در اتاق نیست (شما اولین نفر هستید)'
                 : `${n} نفر دیگر در اتاق هستند`;
         }
 
+        // ─── محدود کردن بیت‌ریت ارسالی روی یک RTCPeerConnection ───
         async function applyBitrateLimit(pc) {
             if (!pc || !pc.getSenders) return;
             for (const sender of pc.getSenders()) {
                 if (!sender.track || sender.track.kind !== 'audio') continue;
                 try {
                     const params = sender.getParameters();
-                    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+                    if (!params.encodings || params.encodings.length === 0) {
+                        params.encodings = [{}];
+                    }
                     params.encodings[0].maxBitrate = MAX_AUDIO_BITRATE;
-                    params.encodings[0].dtx = true;
+                    params.encodings[0].dtx = true;          // کاهش بیت‌ریت در سکوت
                     params.encodings[0].priority = 'very-low';
                     await sender.setParameters(params);
-                } catch (e) { console.warn('setParameters:', e); }
+                } catch (e) {
+                    console.warn('setParameters failed:', e);
+                }
             }
         }
 
+        // روی همه اتصال‌های فعلی و اتصال‌های جدید اعمال کن
         async function limitAllBitrates() {
             if (!room) return;
-            for (const pc of Object.values(room.getPeers())) {
+            const peers = room.getPeers();
+            for (const pc of Object.values(peers)) {
                 await applyBitrateLimit(pc);
             }
         }
 
+        // ─── راه‌اندازی خودکار اتاق (بدون نیاز به کلیک کاربر) ───
         async function initRoom() {
             try {
-                // تلاش برای اتصال با بروکر اختصاصی
-                room = joinRoom({
-                    appId: APP_ID,
-                    relayUrls: GIOT_RELAY_URLS
-                }, ROOM_ID);
+                room = joinRoom({ appId: APP_ID }, ROOM_ID);
 
-                // Trystero رویداد مستقیمی برای موفقیت/شکست MQTT نمی‌دهد.
-                // بعد از چند ثانیه وضعیت را بررسی می‌کنیم.
-                setTimeout(() => {
-                    // اگر تا اینجا room ساخته شده باشد، یعنی joinRoom پرتاب خطا نکرده است.
-                    // اما ممکن است اتصال MQTT در سطح زیرین شکست خورده باشد.
-                    // برای اطمینان، به Console مرورگر نگاه کنید.
-                    setMqttStatus('online');
-                }, 4000);
+                // اتصال MQTT برقرار شد (تقریبی؛ Trystero رویداد مستقیم ندارد)
+                // با اولین peer یا بعد از چند ثانیه وضعیت را «آنلاین» نشان می‌دهیم.
+                setTimeout(() => setMqttStatus(true), 2500);
 
+                // وقتی فرد جدیدی وارد می‌شود
                 room.onPeerJoin(async (peerId) => {
-                    setMqttStatus('online');
+                    setMqttStatus(true);
                     updatePeersCount();
-                    if (selfStream) room.addStream(selfStream, peerId);
+
+                    // اگر میکروفون ما روشن است، استریم را برای او هم بفرست
+                    if (selfStream) {
+                        room.addStream(selfStream, peerId);
+                    }
+
+                    // کمی صبر کن تا اتصال برقرار شود، سپس بیت‌ریت را محدود کن
                     setTimeout(async () => {
                         const peers = room.getPeers();
                         if (peers[peerId]) await applyBitrateLimit(peers[peerId]);
                     }, 1500);
                 });
 
+                // وقتی فردی خارج می‌شود
                 room.onPeerLeave((peerId) => {
                     if (peerAudios[peerId]) {
                         peerAudios[peerId].srcObject = null;
@@ -179,6 +213,7 @@
                     updatePeersCount();
                 });
 
+                // دریافت استریم صوتی از دیگران
                 room.onPeerStream((stream, peerId) => {
                     if (!peerAudios[peerId]) {
                         const audio = document.createElement('audio');
@@ -192,17 +227,18 @@
                     updatePeersCount();
                 });
 
+                // دکمه میکروفون حالا قابل استفاده است
                 micBtn.disabled = false;
                 updatePeersCount();
 
             } catch (err) {
-                console.error('joinRoom error:', err);
-                setMqttStatus('error');
-                mqttLabel.textContent = 'خطا در اتصال به mqtt.giot.ir (Console را ببینید)';
+                mqttLabel.textContent = 'خطا در اتصال به اتاق';
+                console.error(err);
                 micBtn.disabled = true;
             }
         }
 
+        // ─── روشن کردن میکروفون ───
         async function turnMicOn() {
             if (!room) return;
             try {
@@ -210,30 +246,46 @@
                 await room.addStream(selfStream);
                 isMicOn = true;
                 setMicUI(true);
+
+                // بعد از افزودن استریم، بیت‌ریت را روی همه اتصال‌ها محدود کن
                 setTimeout(limitAllBitrates, 1000);
+
             } catch (err) {
                 console.error(err);
-                alert('دسترسی به میکروفون ممکن نشد. HTTPS یا localhost را بررسی کنید.');
+                alert('دسترسی به میکروفون ممکن نشد. مطمئن شوید صفحه را روی HTTPS یا localhost باز کرده‌اید و مجوز میکروفون را داده‌اید.');
                 isMicOn = false;
                 setMicUI(false);
             }
         }
 
+        // ─── خاموش کردن میکروفون ───
         function turnMicOff() {
             if (!room || !selfStream) return;
+
+            // استریم را از اتاق حذف کن
             room.removeStream(selfStream);
+
+            // تِرَک‌ها را متوقف کن تا چراغ میکروفون مرورگر خاموش شود
             selfStream.getTracks().forEach(t => t.stop());
             selfStream = null;
+
             isMicOn = false;
             setMicUI(false);
         }
 
+        // ─── رویداد دکمه ───
         micBtn.addEventListener('click', () => {
-            if (isMicOn) turnMicOff();
-            else turnMicOn();
+            if (isMicOn) {
+                turnMicOff();
+            } else {
+                turnMicOn();
+            }
         });
 
+        // ─── شروع خودکار ───
         initRoom();
+
+        // هر ۵ ثانیه تعداد افراد را تازه کن (برای همگام‌سازی)
         setInterval(updatePeersCount, 5000);
     </script>
 </body>
