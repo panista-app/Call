@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>گفتگوی صوتی گروهی (MQTT - EMQX)</title>
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <title>گفتگوی صوتی گروهی</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
@@ -18,65 +17,110 @@
             justify-content: center;
             user-select: none;
         }
+
         #status-bar {
-            position: fixed; top: 16px; right: 16px;
-            display: flex; align-items: center; gap: 8px;
-            font-size: 13px; color: #aaa;
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: #aaa;
             background: rgba(255,255,255,0.05);
-            padding: 6px 12px; border-radius: 20px;
+            padding: 6px 12px;
+            border-radius: 20px;
         }
-        .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; transition: background 0.3s; }
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #555;
+            transition: background 0.3s;
+        }
         .dot.online { background: #4caf50; }
+        .dot.connecting { background: #ff9800; }
+        .dot.offline { background: #f44336; }
+
         #mic-btn {
-            width: 140px; height: 140px; border-radius: 50%; border: none; cursor: pointer;
-            font-size: 48px; display: flex; align-items: center; justify-content: center;
-            transition: all 0.2s; background: #2a2a2a; color: #888;
-            box-shadow: 0 0 0 0 rgba(76,175,80,0); outline: none;
+            width: 140px;
+            height: 140px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            font-size: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            background: #2a2a2a;
+            color: #888;
+            box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+            outline: none;
         }
         #mic-btn:hover { background: #333; }
-        #mic-btn.active { background: #1b5e20; color: #fff; box-shadow: 0 0 0 16px rgba(76,175,80,0.15); }
+        #mic-btn.active {
+            background: #1b5e20;
+            color: #fff;
+            box-shadow: 0 0 0 16px rgba(76, 175, 80, 0.15);
+        }
         #mic-btn.active:hover { background: #2e7d32; }
         #mic-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-        #label { margin-top: 24px; font-size: 15px; color: #777; text-align: center; line-height: 1.8; }
-        #peers-count { margin-top: 8px; font-size: 13px; color: #555; }
+
+        #label {
+            margin-top: 24px;
+            font-size: 15px;
+            color: #777;
+            text-align: center;
+            line-height: 1.8;
+        }
+
+        #peers-count {
+            margin-top: 8px;
+            font-size: 13px;
+            color: #555;
+        }
+
+        #debug-info {
+            margin-top: 12px;
+            font-size: 11px;
+            color: #444;
+            text-align: center;
+            max-width: 500px;
+            line-height: 1.6;
+        }
     </style>
 </head>
 <body>
 
     <div id="status-bar">
         <span class="dot" id="mqtt-dot"></span>
-        <span id="mqtt-label">در حال اتصال...</span>
+        <span id="mqtt-label">در حال بررسی...</span>
     </div>
 
-    <button id="mic-btn" disabled aria-label="روشن/خاموش کردن میکروفون">🎤</button>
+    <button id="mic-btn" disabled aria-label="روشن/خاموش کردن میکروفون">
+        🎤
+    </button>
 
     <div id="label">
         برای صحبت، دکمه میکروفون را بزنید
         <div id="peers-count">در حال جستجوی اتاق...</div>
+        <div id="debug-info"></div>
     </div>
 
-    <script>
-        // ═══════════════════════════════════════════════════
-        //  بروکر دقیقاً همان بروکر کد قبلی: EMQX Public Broker
-        // ═══════════════════════════════════════════════════
-        const BROKER_URL = "wss://broker.emqx.io:8084/mqtt";
+    <script type="module">
+        // ✅ استفاده از پکیج رسمی @trystero-p2p/mqtt که هم joinRoom و هم getRelaySockets را export می‌کند
+        import { joinRoom, getRelaySockets } from 'https://esm.sh/@trystero-p2p/mqtt';
 
-        const APP_ID  = "my-public-voice-chat-v1";
-        const ROOM_ID = "public-room-main";
+        const micBtn      = document.getElementById('mic-btn');
+        const mqttDot     = document.getElementById('mqtt-dot');
+        const mqttLabel   = document.getElementById('mqtt-label');
+        const peersCount  = document.getElementById('peers-count');
+        const debugInfo   = document.getElementById('debug-info');
 
-        // تاپیک‌ها
-        const TOPIC_SIGNAL = `voice/${APP_ID}/${ROOM_ID}/signal`;
-        const TOPIC_PRESENCE = `voice/${APP_ID}/${ROOM_ID}/presence`;
+        const APP_ID  = 'my-public-voice-chat-v1';
+        const ROOM_ID = 'public-room-main';
 
-        const micBtn     = document.getElementById('mic-btn');
-        const mqttDot    = document.getElementById('mqtt-dot');
-        const mqttLabel  = document.getElementById('mqtt-label');
-        const peersCount = document.getElementById('peers-count');
-
-        // شناسه یکتای خودمان
-        const SELF_ID = 'peer-' + Math.random().toString(36).slice(2, 10);
-
-        // تنظیمات صدا
         const AUDIO_CONSTRAINTS = {
             audio: {
                 channelCount: 1,
@@ -88,32 +132,84 @@
         };
         const MAX_AUDIO_BITRATE = 24000;
 
-        let client = null;
+        let room = null;
         let selfStream = null;
         let isMicOn = false;
+        const peerAudios = {};
 
-        const peers = {};        // peerId -> RTCPeerConnection
-        const peerAudios = {};   // peerId -> HTMLAudioElement
-        const pendingCandidates = {}; // peerId -> []
-
-        // ─── ابزارهای UI ───
         function setMicUI(on) {
             micBtn.classList.toggle('active', on);
             micBtn.textContent = on ? '🔴' : '🎤';
             micBtn.setAttribute('aria-pressed', on);
         }
-        function setMqttStatus(online, text) {
-            mqttDot.classList.toggle('online', online);
-            mqttLabel.textContent = text || (online ? 'متصل به اتاق' : 'در حال اتصال...');
+
+        // ✅ تشخیص دقیق وضعیت اتصال بر اساس سوکت‌های واقعی WebSocket
+        function checkConnectionStatus() {
+            let sockets = {};
+            try {
+                sockets = getRelaySockets();
+            } catch (e) {
+                // اگر getRelaySockets در دسترس نبود
+                mqttDot.className = 'dot offline';
+                mqttLabel.textContent = 'getRelaySockets در دسترس نیست';
+                debugInfo.textContent = 'خطا: ' + e.message;
+                return;
+            }
+
+            const socketList = Object.values(sockets);
+            const total = socketList.length;
+
+            if (total === 0) {
+                mqttDot.className = 'dot connecting';
+                mqttLabel.textContent = 'هیچ سوکتی وجود ندارد';
+                debugInfo.textContent = 'getRelaySockets() آبجکت خالی برگرداند';
+                return;
+            }
+
+            // شمارش سوکت‌ها بر اساس وضعیت
+            let openCount = 0;
+            let connectingCount = 0;
+            let closedCount = 0;
+            const details = [];
+
+            for (const [url, socket] of Object.entries(sockets)) {
+                const state = socket.readyState;
+                let stateText = '';
+                if (state === WebSocket.OPEN) { openCount++; stateText = 'باز'; }
+                else if (state === WebSocket.CONNECTING) { connectingCount++; stateText = 'در حال اتصال'; }
+                else if (state === WebSocket.CLOSING) { stateText = 'در حال بستن'; }
+                else if (state === WebSocket.CLOSED) { closedCount++; stateText = 'بسته'; }
+                
+                // نمایش نام کوتاه بروکر
+                const shortUrl = url.replace('wss://', '').split('/')[0];
+                details.push(`${shortUrl}: ${stateText}`);
+            }
+
+            // تعیین وضعیت کلی
+            if (openCount > 0) {
+                mqttDot.className = 'dot online';
+                mqttLabel.textContent = `متصل به بروکر (${openCount} از ${total})`;
+            } else if (connectingCount > 0) {
+                mqttDot.className = 'dot connecting';
+                mqttLabel.textContent = `در حال اتصال (${connectingCount} سوکت)`;
+            } else {
+                mqttDot.className = 'dot offline';
+                mqttLabel.textContent = `همه سوکت‌ها بسته (${closedCount})`;
+            }
+
+            // نمایش جزئیات در بخش دیباگ
+            debugInfo.textContent = details.join(' | ');
         }
+
         function updatePeersCount() {
+            if (!room) return;
+            const peers = room.getPeers();
             const n = Object.keys(peers).length;
             peersCount.textContent = n === 0
                 ? 'هنوز کسی در اتاق نیست (شما اولین نفر هستید)'
                 : `${n} نفر دیگر در اتاق هستند`;
         }
 
-        // ─── محدود کردن بیت‌ریت ───
         async function applyBitrateLimit(pc) {
             if (!pc || !pc.getSenders) return;
             for (const sender of pc.getSenders()) {
@@ -133,233 +229,100 @@
             }
         }
 
-        // ─── ارسال پیام سیگنالینگ از طریق MQTT ───
-        function sendSignal(to, type, payload) {
-            const msg = { from: SELF_ID, to, type, payload };
-            client.publish(TOPIC_SIGNAL, JSON.stringify(msg));
+        async function limitAllBitrates() {
+            if (!room) return;
+            const peers = room.getPeers();
+            for (const pc of Object.values(peers)) {
+                await applyBitrateLimit(pc);
+            }
         }
 
-        // ─── ایجاد RTCPeerConnection برای یک peer ───
-        function createPeerConnection(peerId, initiator) {
-            if (peers[peerId]) return peers[peerId];
+        async function initRoom() {
+            try {
+                room = joinRoom({ appId: APP_ID }, ROOM_ID);
 
-            const pc = new RTCPeerConnection({
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' }
-                ]
-            });
+                // ✅ هر ۲ ثانیه وضعیت واقعی سوکت‌ها را بررسی کن
+                setInterval(checkConnectionStatus, 2000);
+                setTimeout(checkConnectionStatus, 500);
 
-            peers[peerId] = pc;
-            pendingCandidates[peerId] = [];
+                room.onPeerJoin = async (peerId) => {
+                    checkConnectionStatus();
+                    updatePeersCount();
 
-            // ارسال ICE candidate از طریق MQTT
-            pc.onicecandidate = (e) => {
-                if (e.candidate) {
-                    sendSignal(peerId, 'candidate', e.candidate);
-                }
-            };
-
-            // دریافت استریم صوتی از peer
-            pc.ontrack = (e) => {
-                if (!peerAudios[peerId]) {
-                    const audio = document.createElement('audio');
-                    audio.autoplay = true;
-                    audio.playsInline = true;
-                    audio.style.display = 'none';
-                    document.body.appendChild(audio);
-                    peerAudios[peerId] = audio;
-                }
-                peerAudios[peerId].srcObject = e.streams[0];
-            };
-
-            // اگر میکروفون ما روشن است، تِرَک را اضافه کن
-            if (selfStream) {
-                selfStream.getTracks().forEach(track => {
-                    pc.addTrack(track, selfStream);
-                });
-            }
-
-            // اگر initiator هستیم، offer بساز
-            if (initiator) {
-                pc.onnegotiationneeded = async () => {
-                    try {
-                        const offer = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-                        sendSignal(peerId, 'offer', pc.localDescription);
-                    } catch (err) {
-                        console.error('offer error', err);
+                    if (selfStream) {
+                        room.addStream(selfStream, peerId);
                     }
+
+                    setTimeout(async () => {
+                        const peers = room.getPeers();
+                        if (peers[peerId]) await applyBitrateLimit(peers[peerId]);
+                    }, 1500);
                 };
-            }
 
-            setTimeout(() => applyBitrateLimit(pc), 1000);
-            return pc;
-        }
+                room.onPeerLeave = (peerId) => {
+                    if (peerAudios[peerId]) {
+                        peerAudios[peerId].srcObject = null;
+                        peerAudios[peerId].remove();
+                        delete peerAudios[peerId];
+                    }
+                    updatePeersCount();
+                };
 
-        // ─── پردازش پیام‌های سیگنالینگ دریافتی ───
-        async function handleSignal(msg) {
-            const { from, to, type, payload } = msg;
-            if (to !== SELF_ID) return; // پیام برای ما نیست
-            if (from === SELF_ID) return;
-
-            let pc = peers[from];
-
-            if (type === 'hello') {
-                // فرد جدیدی وارد شد؛ ما initiator می‌شویم
-                if (!pc) {
-                    pc = createPeerConnection(from, true);
-                }
-                updatePeersCount();
-            }
-            else if (type === 'offer') {
-                if (!pc) pc = createPeerConnection(from, false);
-                await pc.setRemoteDescription(new RTCSessionDescription(payload));
-                // کاندیدهای معلق را اضافه کن
-                for (const c of pendingCandidates[from] || []) {
-                    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch(e){}
-                }
-                pendingCandidates[from] = [];
-                const answer = await pc.createAnswer();
-                await pc.setLocalDescription(answer);
-                sendSignal(from, 'answer', pc.localDescription);
-            }
-            else if (type === 'answer') {
-                if (!pc) return;
-                await pc.setRemoteDescription(new RTCSessionDescription(payload));
-                for (const c of pendingCandidates[from] || []) {
-                    try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch(e){}
-                }
-                pendingCandidates[from] = [];
-            }
-            else if (type === 'candidate') {
-                if (!pc || !pc.remoteDescription) {
-                    if (!pendingCandidates[from]) pendingCandidates[from] = [];
-                    pendingCandidates[from].push(payload);
-                } else {
-                    try { await pc.addIceCandidate(new RTCIceCandidate(payload)); } catch(e){}
-                }
-            }
-            else if (type === 'bye') {
-                if (pc) {
-                    pc.close();
-                    delete peers[from];
-                }
-                if (peerAudios[from]) {
-                    peerAudios[from].srcObject = null;
-                    peerAudios[from].remove();
-                    delete peerAudios[from];
-                }
-                updatePeersCount();
-            }
-        }
-
-        // ─── راه‌اندازی اتصال MQTT ───
-        function initRoom() {
-            client = mqtt.connect(BROKER_URL, {
-                clientId: SELF_ID,
-                clean: true,
-                reconnectPeriod: 2000,
-                connectTimeout: 10000
-            });
-
-            client.on('connect', () => {
-                setMqttStatus(true, 'متصل به بروکر EMQX');
-                client.subscribe(TOPIC_SIGNAL, { qos: 0 });
-                client.subscribe(TOPIC_PRESENCE, { qos: 0 });
-
-                // اعلام حضور خودمان
-                client.publish(TOPIC_SIGNAL, JSON.stringify({
-                    from: SELF_ID, to: '*', type: 'hello', payload: null
-                }));
+                room.onPeerStream = (stream, peerId) => {
+                    if (!peerAudios[peerId]) {
+                        const audio = document.createElement('audio');
+                        audio.autoplay = true;
+                        audio.playsInline = true;
+                        audio.style.display = 'none';
+                        document.body.appendChild(audio);
+                        peerAudios[peerId] = audio;
+                    }
+                    peerAudios[peerId].srcObject = stream;
+                    updatePeersCount();
+                };
 
                 micBtn.disabled = false;
-                updatePeersCount();
-            });
 
-            client.on('message', (topic, payload) => {
-                try {
-                    const msg = JSON.parse(payload.toString());
-                    if (topic === TOPIC_SIGNAL) handleSignal(msg);
-                } catch (e) {
-                    console.warn('bad msg', e);
-                }
-            });
-
-            client.on('error', (err) => {
+            } catch (err) {
+                mqttLabel.textContent = 'خطا در اتصال به اتاق';
+                mqttDot.className = 'dot offline';
+                debugInfo.textContent = err.message;
                 console.error(err);
-                setMqttStatus(false, 'خطا در اتصال به بروکر');
-            });
-
-            client.on('close', () => {
-                setMqttStatus(false, 'اتصال قطع شد...');
-            });
+                micBtn.disabled = true;
+            }
         }
 
-        // ─── روشن کردن میکروفون ───
         async function turnMicOn() {
-            if (!client) return;
+            if (!room) return;
             try {
                 selfStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
-
-                // تِرَک‌ها را به همه peerهای موجود اضافه کن
-                for (const [peerId, pc] of Object.entries(peers)) {
-                    selfStream.getTracks().forEach(track => {
-                        pc.addTrack(track, selfStream);
-                    });
-                    // بازسازی offer برای اعمال تِرَک جدید
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    sendSignal(peerId, 'offer', pc.localDescription);
-                }
-
+                await room.addStream(selfStream);
                 isMicOn = true;
                 setMicUI(true);
+                setTimeout(limitAllBitrates, 1000);
             } catch (err) {
                 console.error(err);
-                alert('دسترسی به میکروفون ممکن نشد. صفحه را روی HTTPS یا localhost باز کنید.');
+                alert('دسترسی به میکروفون ممکن نشد. مطمئن شوید صفحه را روی HTTPS یا localhost باز کرده‌اید.');
                 isMicOn = false;
                 setMicUI(false);
             }
         }
 
-        // ─── خاموش کردن میکروفون ───
         function turnMicOff() {
-            if (!selfStream) return;
-
-            for (const pc of Object.values(peers)) {
-                const senders = pc.getSenders();
-                senders.forEach(sender => {
-                    if (sender.track && sender.track.kind === 'audio') {
-                        try { pc.removeTrack(sender); } catch(e){}
-                    }
-                });
-            }
-
+            if (!room || !selfStream) return;
+            room.removeStream(selfStream);
             selfStream.getTracks().forEach(t => t.stop());
             selfStream = null;
             isMicOn = false;
             setMicUI(false);
         }
 
-        // ─── رویداد دکمه ───
         micBtn.addEventListener('click', () => {
             if (isMicOn) turnMicOff();
             else turnMicOn();
         });
 
-        // ─── هنگام بستن صفحه، خداحافظی کن ───
-        window.addEventListener('beforeunload', () => {
-            if (client) {
-                client.publish(TOPIC_SIGNAL, JSON.stringify({
-                    from: SELF_ID, to: '*', type: 'bye', payload: null
-                }));
-            }
-        });
-
-        // ─── شروع ───
         initRoom();
-        setInterval(updatePeersCount, 5000);
     </script>
 </body>
 </html>
